@@ -411,18 +411,15 @@ if test "x$require_libgssapi_krb5_ext" != "xno"; then
         AC_MSG_ERROR(libgssapi_krb5 is needed for GSSAPI security))
 fi
 
-# Select curve encryption library, defaults to tweetnacl
-# To use libsodium instead, use --with-libsodium (must be installed)
+# Select curve encryption library, defaults to libsodium
+# To use builtin tweetnacl instead, use --with-builtin-tweetnacl
 # To disable curve, use --disable-curve
 
 AC_ARG_WITH([libsodium],
-    [AS_HELP_STRING([--with-libsodium], [use libsodium instead of built-in tweetnacl [default=no]])])
+    [AS_HELP_STRING([--with-libsodium], [use libsodium [default=yes]])])
 
-AS_IF([test "x$with_libsodium" = "xyes"], [
-    PKG_CHECK_MODULES([sodium], [libsodium], [libsodium_found=yes], [
-        AC_MSG_ERROR(libsodium is not installed. Install it, then run configure again)
-    ])
-])
+AC_ARG_WITH([builtin_tweetnacl],
+    [AS_HELP_STRING([--with-builtin-tweetnacl], [use built-in tweetnacl [default=no]])])
 
 AC_ARG_ENABLE([curve],
     [AS_HELP_STRING([--disable-curve], [disable CURVE security [default=no]])])
@@ -431,7 +428,16 @@ if test "x$enable_curve" == "xno"; then
     curve_library=""
     AC_MSG_NOTICE([CURVE security is disabled])
 
-elif test "x$with_libsodium" == "xyes"; then
+elif test "x$with_builtin_tweetnacl" == "xyes" || test "x$with_libsodium" == "xno"; then
+    AC_MSG_NOTICE([Using tweetnacl for CURVE security])
+    AC_DEFINE(ZMQ_HAVE_CURVE, [1], [Using curve encryption])
+    AC_DEFINE(ZMQ_USE_TWEETNACL, [1], [Using tweetnacl for curve encryption])
+    curve_library="tweetnacl"
+else
+    PKG_CHECK_MODULES([sodium], [libsodium], [libsodium_found=yes], [
+        AC_MSG_ERROR([libsodium is not installed.  Install it, then run
+    configure again, or configure --with-builtin-tweetnacl or --disable-curve.])
+    ])
     AC_MSG_NOTICE([Using libsodium for CURVE security])
     AC_DEFINE(ZMQ_HAVE_CURVE, [1], [Using curve encryption])
     AC_DEFINE(HAVE_LIBSODIUM, [1], [Using libsodium for curve encryption])
@@ -443,11 +449,6 @@ elif test "x$with_libsodium" == "xyes"; then
             LDFLAGS="-lssp $LDFLAGS"
         ;;
     esac
-else
-    AC_MSG_NOTICE([Using tweetnacl for CURVE security])
-    AC_DEFINE(ZMQ_HAVE_CURVE, [1], [Using curve encryption])
-    AC_DEFINE(ZMQ_USE_TWEETNACL, [1], [Using tweetnacl for curve encryption])
-    curve_library="tweetnacl"
 fi
 
 AM_CONDITIONAL(ENABLE_CURVE_KEYGEN, test "x$enable_curve" == "xyes")
