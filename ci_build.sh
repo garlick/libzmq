@@ -38,6 +38,12 @@ if [ $BUILD_TYPE == "default" ]; then
         CONFIG_OPTS+=("--enable-drafts=yes")
     fi
 
+    if [ -z $GSSAPI ] || [ $GSSAPI == "disabled" ]; then
+        CONFIG_OPTS+=("--without-libgssapi_krb5")
+    elif [ $GSSAPI == "enabled" ]; then
+        CONFIG_OPTS+=("--with-libgssapi_krb5")
+    fi
+
     # Build and check this project
     (
         ./autogen.sh &&

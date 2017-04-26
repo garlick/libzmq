@@ -47,6 +47,12 @@ matrix:
     os: osx
   - env: BUILD_TYPE=default CURVE=tweetnacl DRAFT=enabled ADDRESS_SANITIZER=enabled
     os: linux
+  - env: BUILD_TYPE=default GSSAPI=enabled DRAFT=enabled
+    os: linux
+    addons:
+      apt:
+        packages:
+        - libgssapi-krb5-2
 
 sudo: required
 
