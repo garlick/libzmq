@@ -41,19 +41,32 @@
 #endif
 
 //  This test requires a KRB5 environment with the following
-//  service principal (substitute your host.domain and REALM):
+//  test principals (substitute your host.domain and REALM):
 //
+//    zmqtest1@REALM
 //    zmqtest2/host.domain@REALM   (host.domain should be host running test)
+//    zmqtest3/client@REALM
+//    zmqtest4/client@REALM
 //
-//  Export keys for this principal to a keytab file and set the environment
-//  variables KRB5_KTNAME and KRB5_CLIENT_KTNAME to FILE:/path/to/your/keytab.
-//  The test will use it both for client and server roles.
+//  Export keys for these principals to a single keytab file and set the
+//  environment variables KRB5_KTNAME and KRB5_CLIENT_KTNAME to point to it,
+//  e.g. FILE:/path/to/your/keytab.
 //
-//  The test is derived in large part from test_security_curve.cpp
+//  This test is derived in large part from test_security_curve.cpp
 
-const char *name = "zmqtest2";
 
-static volatile int zap_deny_all = 0;
+struct gss_name {
+    const char *name;
+    int type;
+};
+
+const struct gss_name names[] = {
+    { "zmqtest1",        ZMQ_GSSAPI_NT_USER_NAME },
+    { "zmqtest2",        ZMQ_GSSAPI_NT_HOSTBASED },
+    { "zmqtest3/client", ZMQ_GSSAPI_NT_KRB5_PRINCIPAL },
+    { "zmqtest4/server", ZMQ_GSSAPI_NT_KRB5_PRINCIPAL },
+    { NULL, 0 },
+};
 
 //  Read one event off the monitor socket; return value and address
 //  by reference, if not null, and event number by value. Returns -1
@@ -93,7 +106,6 @@ get_monitor_event (void *monitor, int *value, char **address)
 //  --------------------------------------------------------------------------
 //  This methods receives and validates ZAP requestes (allowing or denying
 //  each client connection).
-//  N.B. on failure, each crypto type in keytab will be tried
 
 static void zap_handler (void *handler)
 {
@@ -116,19 +128,21 @@ static void zap_handler (void *handler)
         s_sendmore (handler, version);
         s_sendmore (handler, sequence);
 
-        if (!zap_deny_all) {
+        //  Deny zmqtest4/server.
+        //  Allow all others.
+        if (strncmp (principal, names[3].name, strlen (names[3].name)) != 0) {
             s_sendmore (handler, "200");
             s_sendmore (handler, "OK");
             s_sendmore (handler, "anonymous");
             s_send     (handler, "");
-	    //fprintf (stderr, "ALLOW %s\n", principal);
+            //fprintf (stderr, "ALLOW %s\n", principal);
         }
         else {
             s_sendmore (handler, "400");
             s_sendmore (handler, "Denied");
             s_sendmore (handler, "");
             s_send     (handler, "");
-	    //fprintf (stderr, "DENY %s\n", principal);
+            //fprintf (stderr, "DENY %s\n", principal);
         }
         free (version);
         free (sequence);
@@ -141,19 +155,23 @@ static void zap_handler (void *handler)
     zmq_close (handler);
 }
 
-void test_valid_creds (void *ctx, void *server, void *server_mon)
+void test_valid_creds (void *ctx, void *server, void *server_mon,
+                       const struct gss_name *cli_name,
+                       const struct gss_name *srv_name)
 {
     void *client = zmq_socket (ctx, ZMQ_DEALER);
     assert (client);
     int rc = zmq_setsockopt (client, ZMQ_GSSAPI_SERVICE_PRINCIPAL,
-                             name, strlen (name) + 1);
+                             srv_name->name, strlen (srv_name->name) + 1);
+    assert (rc == 0);
+    rc = zmq_setsockopt (client, ZMQ_GSSAPI_SERVICE_PRINCIPAL_NAMETYPE,
+                         &srv_name->type, sizeof (int));
     assert (rc == 0);
     rc = zmq_setsockopt (client, ZMQ_GSSAPI_PRINCIPAL,
-                         name, strlen (name) + 1);
+                         cli_name->name, strlen (cli_name->name) + 1);
     assert (rc == 0);
-    int name_type = ZMQ_GSSAPI_NT_HOSTBASED;
     rc = zmq_setsockopt (client, ZMQ_GSSAPI_PRINCIPAL_NAMETYPE,
-                         &name_type, sizeof (name_type));
+                         &cli_name->type, sizeof (int));
     assert (rc == 0);
     rc = zmq_connect (client, "tcp://localhost:9998");
     assert (rc == 0);
@@ -167,23 +185,25 @@ void test_valid_creds (void *ctx, void *server, void *server_mon)
 }
 
 //  Check security with valid but unauthorized credentials
-//  Note: ZAP may see multiple requests - after a failure, client will
-//  fall back to other crypto types for principal, if available.
-void test_unauth_creds (void *ctx, void *server, void *server_mon)
+void test_unauth_creds (void *ctx, void *server, void *server_mon,
+                        const struct gss_name *cli_name,
+                        const struct gss_name *srv_name)
 {
     void *client = zmq_socket (ctx, ZMQ_DEALER);
     assert (client);
     int rc = zmq_setsockopt (client, ZMQ_GSSAPI_SERVICE_PRINCIPAL,
-                              name, strlen (name) + 1);
+                             srv_name->name, strlen (srv_name->name) + 1);
+    assert (rc == 0);
+    rc = zmq_setsockopt (client, ZMQ_GSSAPI_SERVICE_PRINCIPAL_NAMETYPE,
+                         &srv_name->type, sizeof (int));
     assert (rc == 0);
     rc = zmq_setsockopt (client, ZMQ_GSSAPI_PRINCIPAL,
-                         name, strlen (name) + 1);
+                         cli_name->name, strlen (cli_name->name) + 1);
     assert (rc == 0);
-    int name_type = ZMQ_GSSAPI_NT_HOSTBASED;
     rc = zmq_setsockopt (client, ZMQ_GSSAPI_PRINCIPAL_NAMETYPE,
-                         &name_type, sizeof (name_type));
+                         &cli_name->type, sizeof (int));
     assert (rc == 0);
-    zap_deny_all = 1;
+
     rc = zmq_connect (client, "tcp://localhost:9998");
     assert (rc == 0);
 
@@ -253,16 +273,80 @@ void test_vanilla_socket (void *ctx, void *server, void *server_mon)
     close (s);
 }
 
+void setup_server (void *ctx, void **serverp, void **server_monp,
+                   const struct gss_name *name)
+{
+    //  Server socket will accept connections
+    void *server = zmq_socket (ctx, ZMQ_DEALER);
+    assert (server);
+    int as_server = 1;
+    int rc;
+    rc = zmq_setsockopt (server, ZMQ_GSSAPI_SERVER, &as_server, sizeof (int));
+    assert (rc == 0);
+    rc = zmq_setsockopt (server, ZMQ_GSSAPI_PRINCIPAL,
+                         name->name, strlen (name->name) + 1);
+    assert (rc == 0);
+    int name_type = name->type;
+    rc = zmq_setsockopt (server, ZMQ_GSSAPI_PRINCIPAL_NAMETYPE,
+                         &name_type, sizeof (name_type));
+    assert (rc == 0);
+    rc = zmq_bind (server, "tcp://127.0.0.1:9998");
+    assert (rc == 0);
+
+    //  Monitor handshake events on the server
+    char endpoint[128];
+    snprintf (endpoint, sizeof (endpoint), "inproc://monitor-%s", name->name);
+    rc = zmq_socket_monitor (server, endpoint,
+            ZMQ_EVENT_HANDSHAKE_SUCCEED | ZMQ_EVENT_HANDSHAKE_FAILED);
+    assert (rc == 0);
+
+    //  Create socket for collecting monitor events
+    void *server_mon = zmq_socket (ctx, ZMQ_PAIR);
+    assert (server_mon);
+
+    //  Connect it to the inproc endpoints so they'll get events
+    rc = zmq_connect (server_mon, endpoint);
+    assert (rc == 0);
+
+    *serverp = server;
+    *server_monp = server_mon;
+}
+
+void destroy_server (void *server, void *server_mon)
+{
+    close_zero_linger (server_mon);
+    int rc = zmq_close (server);
+    assert (rc == 0);
+}
+
+//  The DIR: ccache type seems to avoid problems with client changing
+//  its principal name on the fly.  With FILE: or MEMORY, principal from
+//  ccache takes precedence over new desired name.
+//  FIXME: need to rm -r this directory when the test ends
+void setup_ccache (void)
+{
+    char *tmpdir = getenv ("TMPDIR");
+    char buf[1024];
+    snprintf (buf, sizeof (buf), "DIR:%s/krb5cc_zmqtest.XXXXXX",
+              tmpdir ? tmpdir : "/tmp");
+    char *path = mkdtemp (buf + 4);
+    assert (path != NULL);
+    int rc = setenv ("KRB5CCNAME", buf, 1);
+    assert (rc == 0);
+}
+
 int main (void)
 {
+    void *server;
+    void *server_mon;
+
     if (!getenv ("KRB5_KTNAME") || !getenv ("KRB5_CLIENT_KTNAME")) {
         printf ("KRB5 environment unavailable, skipping test\n");
         return 77; // SKIP
     }
-    // Avoid entanglements with user's credential cache
-    setenv ("KRB5CCNAME", "MEMORY", 1);
-
     setup_test_environment ();
+    setup_ccache ();
+
     void *ctx = zmq_ctx_new ();
     assert (ctx);
 
@@ -275,46 +359,33 @@ int main (void)
     assert (rc == 0);
     void *zap_thread = zmq_threadstart (&zap_handler, handler);
 
-    //  Server socket will accept connections
-    void *server = zmq_socket (ctx, ZMQ_DEALER);
-    assert (server);
-    int as_server = 1;
-    rc = zmq_setsockopt (server, ZMQ_GSSAPI_SERVER, &as_server, sizeof (int));
-    assert (rc == 0);
-    rc = zmq_setsockopt (server, ZMQ_GSSAPI_PRINCIPAL,
-                         name, strlen (name) + 1);
-    assert (rc == 0);
-    int name_type = ZMQ_GSSAPI_NT_HOSTBASED;
-    rc = zmq_setsockopt (server, ZMQ_GSSAPI_PRINCIPAL_NAMETYPE,
-                         &name_type, sizeof (name_type));
-    assert (rc == 0);
-    rc = zmq_bind (server, "tcp://127.0.0.1:9998");
-    assert (rc == 0);
-
-    //  Monitor handshake events on the server
-    rc = zmq_socket_monitor (server, "inproc://monitor-server",
-            ZMQ_EVENT_HANDSHAKE_SUCCEED | ZMQ_EVENT_HANDSHAKE_FAILED);
-    assert (rc == 0);
-
-    //  Create socket for collecting monitor events
-    void *server_mon = zmq_socket (ctx, ZMQ_PAIR);
-    assert (server_mon);
-
-    //  Connect it to the inproc endpoints so they'll get events
-    rc = zmq_connect (server_mon, "inproc://monitor-server");
-    assert (rc == 0);
-
-    //  Attempt various connections
-    test_valid_creds (ctx, server, server_mon);
+    //fprintf (stderr, "Run server=%s\n", names[1].name);
+    setup_server (ctx, &server, &server_mon, &names[1]);
+    test_valid_creds (ctx, server, server_mon, &names[0], &names[1]);
+    test_valid_creds (ctx, server, server_mon, &names[1], &names[1]);
+    test_valid_creds (ctx, server, server_mon, &names[2], &names[1]);
+    test_unauth_creds (ctx, server, server_mon, &names[3], &names[1]);
     test_null_creds (ctx, server, server_mon);
     test_plain_creds (ctx, server, server_mon);
     test_vanilla_socket (ctx, server, server_mon);
-    test_unauth_creds (ctx, server, server_mon);
+    destroy_server (server, server_mon);
 
-    //  Shutdown
-    close_zero_linger (server_mon);
-    rc = zmq_close (server);
-    assert (rc == 0);
+    //fprintf (stderr, "Run server=%s\n", names[0].name);
+    setup_server (ctx, &server, &server_mon, &names[0]);
+    test_valid_creds (ctx, server, server_mon, &names[0], &names[0]);
+    test_valid_creds (ctx, server, server_mon, &names[1], &names[0]);
+    test_valid_creds (ctx, server, server_mon, &names[2], &names[0]);
+    test_unauth_creds (ctx, server, server_mon, &names[3], &names[0]);
+    destroy_server (server, server_mon);
+
+    //fprintf (stderr, "Run server=%s\n", names[3].name);
+    setup_server (ctx, &server, &server_mon, &names[3]);
+    test_valid_creds (ctx, server, server_mon, &names[0], &names[3]);
+    test_valid_creds (ctx, server, server_mon, &names[1], &names[3]);
+    test_valid_creds (ctx, server, server_mon, &names[2], &names[3]);
+    test_unauth_creds (ctx, server, server_mon, &names[3], &names[3]);
+    destroy_server (server, server_mon);
+
     rc = zmq_ctx_term (ctx);
     assert (rc == 0);
 
